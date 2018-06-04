@@ -20,11 +20,11 @@ package org.apache.spark.ui.exec
 import scala.collection.mutable
 import scala.collection.mutable.{LinkedHashMap, ListBuffer}
 
-import org.apache.spark.{Resubmitted, SparkConf, SparkContext}
-import org.apache.spark.annotation.DeveloperApi
-import org.apache.spark.scheduler._
-import org.apache.spark.storage.{StorageStatus, StorageStatusListener}
-import org.apache.spark.ui.{SparkUI, SparkUITab}
+import javax.servlet.http.HttpServletRequest
+
+import scala.xml.Node
+
+import org.apache.spark.ui.{SparkUI, SparkUITab, UIUtils, WebUIPage}
 
 private[ui] class ExecutorsTab(parent: SparkUI) extends SparkUITab(parent, "executors") {
   val listener = parent.executorsListener
@@ -75,147 +75,79 @@ class ExecutorsListener(storageStatusListener: StorageStatusListener, conf: Spar
 
   def activeStorageStatusList: Seq[StorageStatus] = storageStatusListener.storageStatusList
 
-  def deadStorageStatusList: Seq[StorageStatus] = storageStatusListener.deadStorageStatusList
+  private[ui] class ExecutorsTab(parent: SparkUI) extends SparkUITab(parent, "executors") {
 
-  override def onExecutorAdded(
-      executorAdded: SparkListenerExecutorAdded): Unit = synchronized {
-    val eid = executorAdded.executorId
-    val taskSummary = executorToTaskSummary.getOrElseUpdate(eid, ExecutorTaskSummary(eid))
-    taskSummary.executorLogs = executorAdded.executorInfo.logUrlMap
-    taskSummary.totalCores = executorAdded.executorInfo.totalCores
-    taskSummary.tasksMax = taskSummary.totalCores / conf.getInt("spark.task.cpus", 1)
-    executorEvents += executorAdded
-    if (executorEvents.size > maxTimelineExecutors) {
-      executorEvents.remove(0)
-    }
+    init()
 
-    val deadExecutors = executorToTaskSummary.filter(e => !e._2.isAlive)
-    if (deadExecutors.size > retainedDeadExecutors) {
-      val head = deadExecutors.head
-      executorToTaskSummary.remove(head._1)
-    }
-  }
+    private def init(): Unit = {
+      val threadDumpEnabled =
+        parent.sc.isDefined && parent.conf.getBoolean("spark.ui.threadDumpsEnabled", true)
 
-  override def onExecutorRemoved(
-      executorRemoved: SparkListenerExecutorRemoved): Unit = synchronized {
-    executorEvents += executorRemoved
-    if (executorEvents.size > maxTimelineExecutors) {
-      executorEvents.remove(0)
-    }
-    executorToTaskSummary.get(executorRemoved.executorId).foreach(e => e.isAlive = false)
-  }
-
-  override def onApplicationStart(
-      applicationStart: SparkListenerApplicationStart): Unit = {
-    applicationStart.driverLogs.foreach { logs =>
-      val storageStatus = activeStorageStatusList.find { s =>
-        s.blockManagerId.executorId == SparkContext.LEGACY_DRIVER_IDENTIFIER ||
-        s.blockManagerId.executorId == SparkContext.DRIVER_IDENTIFIER
-      }
-      storageStatus.foreach { s =>
-        val eid = s.blockManagerId.executorId
-        val taskSummary = executorToTaskSummary.getOrElseUpdate(eid, ExecutorTaskSummary(eid))
-        taskSummary.executorLogs = logs.toMap
+      attachPage(new ExecutorsPage(this, threadDumpEnabled))
+      if (threadDumpEnabled) {
+        attachPage(new ExecutorThreadDumpPage(this, parent.sc))
       }
     }
-  }
 
-  override def onTaskStart(
-      taskStart: SparkListenerTaskStart): Unit = synchronized {
-    val eid = taskStart.taskInfo.executorId
-    val taskSummary = executorToTaskSummary.getOrElseUpdate(eid, ExecutorTaskSummary(eid))
-    taskSummary.tasksActive += 1
-  }
-
-  override def onTaskEnd(
-      taskEnd: SparkListenerTaskEnd): Unit = synchronized {
-    val info = taskEnd.taskInfo
-    if (info != null) {
-      val eid = info.executorId
-      val taskSummary = executorToTaskSummary.getOrElseUpdate(eid, ExecutorTaskSummary(eid))
-      // Note: For resubmitted tasks, we continue to use the metrics that belong to the
-      // first attempt of this task. This may not be 100% accurate because the first attempt
-      // could have failed half-way through. The correct fix would be to keep track of the
-      // metrics added by each attempt, but this is much more complicated.
-      if (taskEnd.reason == Resubmitted) {
-        return
-      }
-      if (info.successful) {
-        taskSummary.tasksComplete += 1
-      } else {
-        taskSummary.tasksFailed += 1
-      }
-      if (taskSummary.tasksActive >= 1) {
-        taskSummary.tasksActive -= 1
-      }
-      taskSummary.duration += info.duration
-
-      // Update shuffle read/write
-      val metrics = taskEnd.taskMetrics
-      if (metrics != null) {
-        taskSummary.inputBytes += metrics.inputMetrics.bytesRead
-        taskSummary.inputRecords += metrics.inputMetrics.recordsRead
-        taskSummary.outputBytes += metrics.outputMetrics.bytesWritten
-        taskSummary.outputRecords += metrics.outputMetrics.recordsWritten
-
-        taskSummary.shuffleRead += metrics.shuffleReadMetrics.remoteBytesRead
-        taskSummary.shuffleWrite += metrics.shuffleWriteMetrics.bytesWritten
-        taskSummary.jvmGCTime += metrics.jvmGCTime
-      }
-    }
-  }
-
-  private def updateExecutorBlacklist(
+    private def updateExecutorBlacklist(
       eid: String,
       isBlacklisted: Boolean): Unit = {
-    val execTaskSummary = executorToTaskSummary.getOrElseUpdate(eid, ExecutorTaskSummary(eid))
-    execTaskSummary.isBlacklisted = isBlacklisted
-  }
-
-  def getExecutorHost(eid: String): String = {
-    val host = activeStorageStatusList.find { id =>
-      id.blockManagerId.executorId == eid
+      val execTaskSummary = executorToTaskSummary.getOrElseUpdate(eid, ExecutorTaskSummary(eid))
+      execTaskSummary.isBlacklisted = isBlacklisted
     }
-    if( host.nonEmpty ) {
-      return host.head.blockManagerId.hostPort
-    } else {
-      return "CANNOT FIND ADDRESS"
-    }
-  }
 
-  override def onExecutorBlacklisted(
+    def getExecutorHost(eid: String): String = {
+      val host = activeStorageStatusList.find { id =>
+        id.blockManagerId.executorId == eid
+      }
+      if (host.nonEmpty) {
+        return host.head.blockManagerId.hostPort
+      } else {
+        return "CANNOT FIND ADDRESS"
+      }
+    }
+
+    override def onExecutorBlacklisted(
       executorBlacklisted: SparkListenerExecutorBlacklisted)
-  : Unit = synchronized {
-    updateExecutorBlacklist(executorBlacklisted.executorId, true)
-  }
+    : Unit = synchronized {
+      updateExecutorBlacklist(executorBlacklisted.executorId, true)
+    }
 
-  override def onExecutorUnblacklisted(
+    override def onExecutorUnblacklisted(
       executorUnblacklisted: SparkListenerExecutorUnblacklisted)
-  : Unit = synchronized {
-    updateExecutorBlacklist(executorUnblacklisted.executorId, false)
-  }
+    : Unit = synchronized {
+      updateExecutorBlacklist(executorUnblacklisted.executorId, false)
+    }
 
-  override def onNodeBlacklisted(
+    override def onNodeBlacklisted(
       nodeBlacklisted: SparkListenerNodeBlacklisted)
-  : Unit = synchronized {
-    // Implicitly blacklist every executor associated with this node, and show this in the UI.
-    activeStorageStatusList.foreach { status =>
-      if (status.blockManagerId.host == nodeBlacklisted.hostId) {
-        updateExecutorBlacklist(status.blockManagerId.executorId, true)
+    : Unit = synchronized {
+      // Implicitly blacklist every executor associated with this node, and show this in the UI.
+      activeStorageStatusList.foreach { status =>
+        if (status.blockManagerId.host == nodeBlacklisted.hostId) {
+          updateExecutorBlacklist(status.blockManagerId.executorId, true)
+        }
       }
     }
   }
 
-  override def onNodeUnblacklisted(
-      nodeUnblacklisted: SparkListenerNodeUnblacklisted)
-  : Unit = synchronized {
-    // Implicitly unblacklist every executor associated with this node, regardless of how
-    // they may have been blacklisted initially (either explicitly through executor blacklisting
-    // or implicitly through node blacklisting). Show this in the UI.
-    activeStorageStatusList.foreach { status =>
-      if (status.blockManagerId.host == nodeUnblacklisted.hostId) {
-        updateExecutorBlacklist(status.blockManagerId.executorId, false)
-      }
+  private[ui] class ExecutorsPage(
+    parent: SparkUITab,
+    threadDumpEnabled: Boolean)
+    extends WebUIPage("") {
+
+    def render(request: HttpServletRequest): Seq[Node] = {
+      val content =
+        <div>
+          {<div id="active-executors" class="row-fluid"></div> ++
+          <script src={UIUtils.prependBaseUri(request, "/static/utils.js")}></script> ++
+          <script src={UIUtils.prependBaseUri(request, "/static/executorspage.js")}></script> ++
+          <script>setThreadDumpEnabled(
+            {threadDumpEnabled}
+            )</script>}
+        </div>
+
+      UIUtils.headerSparkPage(request, "Executors", content, parent, useDataTables = true)
     }
   }
 }

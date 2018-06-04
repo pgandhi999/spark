@@ -108,7 +108,12 @@ $(document).ready(function() {
     requestedIncomplete = getParameterByName("showIncomplete", searchString);
     requestedIncomplete = (requestedIncomplete == "true" ? true : false);
 
-    $.getJSON("api/v1/applications?limit=" + appLimit, function(response,status,jqXHR) {
+    appParams = {
+      limit: appLimit,
+      status: (requestedIncomplete ? "running" : "completed")
+    };
+
+    $.getJSON(uiRoot + "/api/v1/applications", appParams, function(response,status,jqXHR) {
       var array = [];
       var hasMultipleAttempts = false;
       for (i in response) {
@@ -124,9 +129,9 @@ $(document).ready(function() {
         var num = app["attempts"].length;
         for (j in app["attempts"]) {
           var attempt = app["attempts"][j];
-          attempt["startTime"] = formatDate(attempt["startTime"]);
-          attempt["endTime"] = formatDate(attempt["endTime"]);
-          attempt["lastUpdated"] = formatDate(attempt["lastUpdated"]);
+          attempt["startTime"] = formatTimeMillis(attempt["startTimeEpoch"]);
+          attempt["endTime"] = formatTimeMillis(attempt["endTimeEpoch"]);
+          attempt["lastUpdated"] = formatTimeMillis(attempt["lastUpdatedEpoch"]);
           attempt["log"] = uiRoot + "/api/v1/applications/" + id + "/" +
             (attempt.hasOwnProperty("attemptId") ? attempt["attemptId"] + "/" : "") + "logs";
           attempt["durationMillisec"] = attempt["duration"];
@@ -146,7 +151,7 @@ $(document).ready(function() {
         "showCompletedColumns": !requestedIncomplete,
       }
 
-      $.get("static/historypage-template.html", function(template) {
+      $.get(uiRoot + "/static/historypage-template.html", function(template) {
         var sibling = historySummary.prev();
         historySummary.detach();
         var apps = $(Mustache.render($(template).filter("#history-summary-template").html(),data));

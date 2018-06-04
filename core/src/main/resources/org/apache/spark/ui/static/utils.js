@@ -135,3 +135,31 @@ function formatDate(date) {
   if (date <= 0) return "-";
   else return date.split(".")[0].replace("T", " ");
 }
+
+function padZeroes(num) {
+  return ("0" + num).slice(-2);
+}
+
+function formatTimeMillis(timeMillis) {
+  if (timeMillis <= 0) {
+    return "-";
+  } else {
+    var dt = new Date(timeMillis);
+    return dt.getFullYear() + "-" +
+      padZeroes(dt.getMonth() + 1) + "-" +
+      padZeroes(dt.getDate()) + " " +
+      padZeroes(dt.getHours()) + ":" +
+      padZeroes(dt.getMinutes()) + ":" +
+      padZeroes(dt.getSeconds());
+  }
+}
+
+function getTimeZone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch(ex) {
+    // Get time zone from a string representing the date,
+    // eg. "Thu Nov 16 2017 01:13:32 GMT+0800 (CST)" -> "CST"
+    return new Date().toString().match(/\((.*)\)/)[1];
+  }
+}
